@@ -56,8 +56,8 @@ def appearance(
     delta_m_2_32=DELTA_M_2_32,
     delta_cp=0,
 ):
-    d2_31 = (delta_m_2_32 + delta_m_2_21) * BASELINE / (4 * E_v)
-    d2_21 = delta_m_2_21 * BASELINE / (4 * E_v)
+    d2_31 = 1.27 * (delta_m_2_32 + delta_m_2_21) * BASELINE / E_v
+    d2_21 = 1.27 * delta_m_2_21 * BASELINE / E_v
     ps = [
         sin_2_theta_23
         * (1 - (1 - 2 * sin_2_theta_13) ** 2)
