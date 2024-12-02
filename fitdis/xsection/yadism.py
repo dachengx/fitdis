@@ -5,6 +5,7 @@ import numpy as np
 from eko import interpolation
 import pineappl
 import yadism
+from yadism.esf.exs import GEV_CM2_CONV
 
 # import function that dumps the predictions into a Pineappl format
 from yadbox.export import dump_pineappl_to_file
@@ -68,6 +69,11 @@ default_theory_card = {
 }
 
 
+reverted_norm = {
+    "XSHERACC": 4.0,
+}
+
+
 class YadismModel:
     def __init__(
         self,
@@ -83,10 +89,14 @@ class YadismModel:
         n_mid=20,
         n_high=0,
         x_min=1e-7,
+        x=np.linspace(1e-7, 1.0, 11),
+        y=np.linspace(1e-7, 1.0, 11),
     ):
-        self.E_v = E_v
+        self.E_v = float(E_v)
         self.Z = Z
         self.A = A
+        self.x = x
+        self.y = y
 
         # Potentially include observables other than XSHERANCAVG_charm,
         # each of them has to be: TYPE_heaviness, where heaviness can take:
@@ -109,22 +119,52 @@ class YadismModel:
 
     @property
     def suffix(self):
-        return f"_{self.observable}_{self.theory_card['FNS']}.pineappl.lz4"
+        return f"_{self.observable}_{self.theory_card['FNS']}_{self.E_v:.2f}.pineappl.lz4"
 
-    def run(self, x, y):
+    @property
+    def filenames(self):
+        return [f"{target}{self.suffix}" for target in ["proton", "neutron"]]
+
+    @property
+    def exists(self):
+        return all([os.path.exists(filename) for filename in self.filenames])
+
+    def avg_isotope(self, results):
+        avg_results = results["proton"] * self.Z + results["neutron"] * (self.A - self.Z)
+        avg_results /= self.A
+        avg_results *= reverted_norm[self._observables]
+        return avg_results
+
+    @property
+    def s(self):
+        return 2 * self.theory_card["MP"] * self.E_v
+
+    def get_Q2(self, x, y):
+        Q2 = (self.s - self.theory_card["MP"] ** 2) * x * y
+        return Q2
+
+    def get_observables(self, x=None, y=None):
         if isinstance(x, (int, float)):
             x = [x]
         if isinstance(y, (int, float)):
             y = [y]
 
+        if x is None:
+            X, Y = np.meshgrid(self.x, self.y, indexing="ij")
+        else:
+            if y is None:
+                raise ValueError("y must be provided if x is provided.")
+            X, Y = np.meshgrid(x, y, indexing="ij")
+        Q2 = self.get_Q2(X, Y)
+
+        observables = []
+        for _x, _y, _Q2 in zip(X.ravel(), Y.ravel(), Q2.ravel()):
+            observables.append({"x": _x, "y": _y, "Q2": _Q2})
+        return observables
+
+    def run(self, x=None, y=None):
         _observable_card = deepcopy(self.observable_card)
-        X, Y = np.meshgrid(x, y, indexing="ij")
-        m_n = self.theory_card["MP"]
-        s = 2 * m_n * self.E_v
-        Q2 = (s - m_n**2) * X * Y
-        _observable_card["observables"] = {self.observable: []}
-        for x, y, _Q2 in zip(X.ravel(), Y.ravel(), Q2.ravel()):
-            _observable_card["observables"][self.observable].append({"x": x, "y": y, "Q2": _Q2})
+        _observable_card["observables"] = {self.observable: self.get_observables(x=x, y=y)}
 
         # Scattering target: "proton", "neutron", "isoscalar", "lead", "iron", "neon" or "marble"
         for target in ["proton", "neutron"]:
@@ -132,6 +172,15 @@ class YadismModel:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")  # skip noisy warnings
                 self.out[target] = yadism.run_yadism(self.theory_card, _observable_card)
+
+    def apply(self, lhaid="NNPDF40_nnlo_as_01180", member=0):
+        results = dict()
+        pdf = load_pdf(lhaid, member)
+        for target in ["proton", "neutron"]:
+            results[target] = self.out[target].apply_pdf(pdf)
+            results[target] = np.array([r["result"] for r in results[target][self.observable]])
+        avg_results = self.avg_isotope(results)
+        return avg_results
 
     def dump(self, replace=False):
         for target in ["proton", "neutron"]:
@@ -144,13 +193,31 @@ class YadismModel:
 
     def load(self, pid=2212, lhaid="NNPDF40_nnlo_as_01180", member=0):
         results = dict()
+        pdf = load_pdf(lhaid, member)
         for target in ["proton", "neutron"]:
             filename = f"{target}{self.suffix}"
             if not os.path.exists(filename):
                 raise FileNotFoundError(f"{filename} does not exist.")
             grid = pineappl.grid.Grid.read(filename)
-            pdf = load_pdf(lhaid, member)
             results[target] = np.array(grid.convolve_with_one(pid, pdf.xfxQ2, pdf.alphasQ2))
-        avg_results = results["proton"] * self.Z + results["neutron"] * (self.A - self.Z)
-        avg_results /= self.A
+        avg_results = self.avg_isotope(results)
         return avg_results
+
+    def d2sdxdy(self, pid=2212, lhaid="NNPDF40_nnlo_as_01180", member=0):
+        # in 10^-38 cm^2
+        form = self.load(lhaid=lhaid, member=member)
+        form = form.reshape((len(self.x), len(self.y)))
+        X, Y = np.meshgrid(self.x, self.y, indexing="ij")
+        Q2 = self.get_Q2(X, Y)
+        r = self.theory_card["GF"] ** 2 * self.s
+        r /= 4 * np.pi * (1 + Q2 / self.theory_card["MW"] ** 2) ** 2
+        r *= form * GEV_CM2_CONV
+        return r
+
+    def sigma(self, pid=2212, lhaid="NNPDF40_nnlo_as_01180", member=0):
+        d2sdxdy = self.d2sdxdy(pid=pid, lhaid=lhaid, member=member)
+        if np.std(np.diff(self.x)) > 1e-4 or np.std(np.diff(self.y)) > 1e-4:
+            raise ValueError("x and y must be evenly spaced.")
+        dx = np.diff(self.x)[0]
+        dy = np.diff(self.y)[0]
+        return np.sum(d2sdxdy) * dx * dy
