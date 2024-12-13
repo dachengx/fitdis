@@ -70,7 +70,8 @@ default_theory_card = {
 
 
 reverted_norm = {
-    "XSHERACC": 4.0,
+    "XSHERACC": lambda Q2, M2W: 1 / 4,
+    "XSNUTEVCC": lambda Q2, M2W: 50 / (1 + Q2 / M2W) ** 2,
 }
 
 
@@ -79,7 +80,7 @@ class YadismModel:
         self,
         E_v,
         Z=18,
-        A=40,
+        A=39,
         observable_card=dict(),
         theory_card=dict(),
         observables="XSHERACC",
@@ -88,15 +89,16 @@ class YadismModel:
         n_low=30,
         n_mid=20,
         n_high=0,
-        x_min=1e-7,
-        x=np.linspace(1e-7, 1.0, 11),
-        y=np.linspace(1e-7, 1.0, 11),
+        x_min=1e-6,
+        x=np.linspace(1e-6, 1.0, 11),
+        y=np.linspace(1e-6, 1.0, 11),
     ):
         self.E_v = float(E_v)
         self.Z = Z
         self.A = A
         self.x = x
         self.y = y
+        self.X, self.Y = np.meshgrid(self.x, self.y, indexing="ij")
 
         # Potentially include observables other than XSHERANCAVG_charm,
         # each of them has to be: TYPE_heaviness, where heaviness can take:
@@ -115,25 +117,32 @@ class YadismModel:
 
         self.observable_card = {**_observable_card, **observable_card}
         self.theory_card = {**_theory_card, **theory_card}
-        self.out = dict()
 
     @property
-    def suffix(self):
-        return f"_{self.observable}_{self.theory_card['FNS']}_{self.E_v:.2f}.pineappl.lz4"
+    def TargetDISid(self):
+        if self.Z == 1 and self.A == 1:
+            return "2212"
+        elif self.Z == 0 and self.A == 1:
+            return "2112"
+        return f"100{self.Z:03d}{self.A:03d}0"
 
     @property
-    def filenames(self):
-        return [f"{target}{self.suffix}" for target in ["proton", "neutron"]]
+    def lhaid(self):
+        # if self.A == 1:
+        #     return "NNPDF40_nnlo_as_01180"
+        # elif self.Z == 1 and self.A == 2:
+        #     return "NNSFnu_D_lowQ"
+        # elif self.Z == 18 and self.A == 39:
+        #     return "NNSFnu_Ar_lowQ"
+        return "NNPDF40_nnlo_as_01180"
+
+    @property
+    def filename(self):
+        return f"{self.observable}_{self.theory_card['FNS']}_{self.E_v:.2f}.pineappl.lz4"
 
     @property
     def exists(self):
-        return all([os.path.exists(filename) for filename in self.filenames])
-
-    def avg_isotope(self, results):
-        avg_results = results["proton"] * self.Z + results["neutron"] * (self.A - self.Z)
-        avg_results /= self.A
-        avg_results *= reverted_norm[self._observables]
-        return avg_results
+        return os.path.exists(self.filename)
 
     @property
     def s(self):
@@ -143,79 +152,63 @@ class YadismModel:
         Q2 = (self.s - self.theory_card["MP"] ** 2) * x * y
         return Q2
 
-    def get_observables(self, x=None, y=None):
-        if isinstance(x, (int, float)):
-            x = [x]
-        if isinstance(y, (int, float)):
-            y = [y]
-
-        if x is None:
-            X, Y = np.meshgrid(self.x, self.y, indexing="ij")
-        else:
-            if y is None:
-                raise ValueError("y must be provided if x is provided.")
-            X, Y = np.meshgrid(x, y, indexing="ij")
-        Q2 = self.get_Q2(X, Y)
-
+    def _get_observables(self):
         observables = []
-        for _x, _y, _Q2 in zip(X.ravel(), Y.ravel(), Q2.ravel()):
+        for _x, _y, _Q2 in zip(self.X.ravel(), self.Y.ravel(), self.get_Q2(self.X, self.Y).ravel()):
             observables.append({"x": _x, "y": _y, "Q2": _Q2})
         return observables
 
-    def run(self, x=None, y=None):
+    def run(self):
         _observable_card = deepcopy(self.observable_card)
-        _observable_card["observables"] = {self.observable: self.get_observables(x=x, y=y)}
+        _observable_card["observables"] = {self.observable: self._get_observables()}
 
         # Scattering target: "proton", "neutron", "isoscalar", "lead", "iron", "neon" or "marble"
-        for target in ["proton", "neutron"]:
-            _observable_card["TargetDIS"] = target
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")  # skip noisy warnings
-                self.out[target] = yadism.run_yadism(self.theory_card, _observable_card)
-
-    def apply(self, lhaid="NNPDF40_nnlo_as_01180", member=0):
-        results = dict()
-        pdf = load_pdf(lhaid, member)
-        for target in ["proton", "neutron"]:
-            results[target] = self.out[target].apply_pdf(pdf)
-            results[target] = np.array([r["result"] for r in results[target][self.observable]])
-        avg_results = self.avg_isotope(results)
-        return avg_results
+        _observable_card["TargetDIS"] = {"Z": self.Z, "A": self.A}
+        _observable_card["TargetDISid"] = self.TargetDISid
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # skip noisy warnings
+            self.out = yadism.run_yadism(self.theory_card, _observable_card)
 
     def dump(self, replace=False):
-        for target in ["proton", "neutron"]:
-            filename = f"{target}{self.suffix}"
-            if os.path.exists(filename) and not replace:
-                raise FileExistsError(
-                    f"{filename} already exists. Set replace=True to overwrite it."
-                )
-            dump_pineappl_to_file(self.out[target], filename, self.observable)
+        if self.exists and not replace:
+            raise FileExistsError(
+                f"{self.filename} already exists. Set replace=True to overwrite it."
+            )
+        dump_pineappl_to_file(self.out, self.filename, self.observable)
 
-    def load(self, pid=2212, lhaid="NNPDF40_nnlo_as_01180", member=0):
-        results = dict()
-        pdf = load_pdf(lhaid, member)
-        for target in ["proton", "neutron"]:
-            filename = f"{target}{self.suffix}"
-            if not os.path.exists(filename):
-                raise FileNotFoundError(f"{filename} does not exist.")
-            grid = pineappl.grid.Grid.read(filename)
-            results[target] = np.array(grid.convolve_with_one(pid, pdf.xfxQ2, pdf.alphasQ2))
-        avg_results = self.avg_isotope(results)
-        return avg_results
+    @property
+    def norm(self):
+        n = self.theory_card["GF"] ** 2 * self.s
+        M2W = self.theory_card["MW"] ** 2
+        Q2 = self.get_Q2(self.X, self.Y)
+        n /= 4 * np.pi * (1 + Q2 / M2W) ** 2
+        n /= reverted_norm[self._observables](Q2, M2W)
+        n *= GEV_CM2_CONV
+        return n
 
-    def d2sdxdy(self, pid=2212, lhaid="NNPDF40_nnlo_as_01180", member=0):
+    def apply(self, member=0):
+        pdf = load_pdf(self.lhaid, member)
+        form = self.out.apply_pdf(pdf)
+        form = np.array([r["result"] for r in form[self.observable]])
+        form = form.reshape(self.X.shape)
+        return form * self.norm
+
+    def load(self, member=0):
+        pdf = load_pdf(self.lhaid, member)
+        if not self.exists:
+            raise FileNotFoundError(f"{self.filename} does not exist.")
+        grid = pineappl.grid.Grid.read(self.filename)
+        form = np.array(grid.convolve_with_one(2212, pdf.xfxQ2, pdf.alphasQ2))
+        return form
+
+    def d2sdxdy(self, member=0):
         # in 10^-38 cm^2
-        form = self.load(lhaid=lhaid, member=member)
-        form = form.reshape((len(self.x), len(self.y)))
-        X, Y = np.meshgrid(self.x, self.y, indexing="ij")
-        Q2 = self.get_Q2(X, Y)
-        r = self.theory_card["GF"] ** 2 * self.s
-        r /= 4 * np.pi * (1 + Q2 / self.theory_card["MW"] ** 2) ** 2
-        r *= form * GEV_CM2_CONV
-        return r
+        form = self.load(member=member)
+        form = form.reshape(self.X.shape)
+        return form * self.norm
 
-    def sigma(self, pid=2212, lhaid="NNPDF40_nnlo_as_01180", member=0):
-        d2sdxdy = self.d2sdxdy(pid=pid, lhaid=lhaid, member=member)
+    def sigma(self, member=0):
+        d2sdxdy = self.d2sdxdy(member=member)
         if np.std(np.diff(self.x)) > 1e-4 or np.std(np.diff(self.y)) > 1e-4:
             raise ValueError("x and y must be evenly spaced.")
         dx = np.diff(self.x)[0]
