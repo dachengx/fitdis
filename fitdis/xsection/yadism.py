@@ -146,7 +146,7 @@ class YadismModel:
 
     @property
     def s(self):
-        return 2 * self.theory_card["MP"] * self.E_v
+        return 2 * self.theory_card["MP"] * self.E_v + self.theory_card["MP"] ** 2
 
     def get_Q2(self, x, y):
         Q2 = (self.s - self.theory_card["MP"] ** 2) * x * y

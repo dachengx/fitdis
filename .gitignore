@@ -1,4 +1,5 @@
 .ipynb_checkpoints
 *.svg
+*.png
 *.lz4
 *.npy

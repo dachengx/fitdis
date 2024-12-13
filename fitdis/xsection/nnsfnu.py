@@ -22,7 +22,7 @@ def d2sdxdy(
 ):
     X, Y = np.meshgrid(x, y, indexing="ij")
 
-    s = 2 * MP * E_v
+    s = 2 * MP * E_v  # + MP ** 2
     Q2 = (s - MP**2) * X * Y
     ys = np.array([1 + (1 - Y.ravel()) ** 2, -Y.ravel() ** 2, 1 - (1 - Y.ravel()) ** 2])
     norm = GF**2 * s
