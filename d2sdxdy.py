@@ -26,5 +26,5 @@ for E_v in E_vs:
     ax.set_ylabel("$y$")
 
     # fig.savefig(f"plots/d2sdxdy_{E_v:.2f}.svg", transparent=True, dpi=800)
-    fig.savefig(f"plots/d2sdxdy_{E_v:.2f}.png", transparent=True, dpi=800)
+    fig.savefig(f"plots/d2sdxdy_{E_v:.2f}.pdf", transparent=True, dpi=800)
     plt.close(fig)
